@@ -1,0 +1,6 @@
+{
+  "name": "NimTerm",
+  "description": "Mobile Python terminal emulator and Claude Code style AI coding CLI powered by NVIDIA NIM models with background foreground-service persistence.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

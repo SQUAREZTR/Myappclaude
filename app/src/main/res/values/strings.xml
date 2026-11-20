@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">NimTerm</string>
+    <string name="service_channel_name">NimTerm Background Session</string>
+    <string name="service_channel_description">Keeps Python scripts, terminal sessions, and NVIDIA NIM coding agent tasks running in the background.</string>
+    <string name="nav_terminal">Terminal</string>
+    <string name="nav_files">Workspace</string>
+    <string name="nav_models">Models</string>
+    <string name="nav_settings">Settings</string>
+</resources>
