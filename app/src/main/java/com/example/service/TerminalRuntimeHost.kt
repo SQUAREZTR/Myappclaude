@@ -78,6 +78,9 @@ class TerminalRuntimeHost(private val appContext: Context) {
     private val _activeWorkspace = MutableStateFlow("default")
     val activeWorkspace: StateFlow<String> = _activeWorkspace.asStateFlow()
 
+    private val _workspaceFilesVersion = MutableStateFlow(0)
+    val workspaceFilesVersion: StateFlow<Int> = _workspaceFilesVersion.asStateFlow()
+
     private val _isServiceActive = MutableStateFlow(false)
     val isServiceActive: StateFlow<Boolean> = _isServiceActive.asStateFlow()
 
@@ -156,6 +159,9 @@ class TerminalRuntimeHost(private val appContext: Context) {
         onWorkspaceChanged = { wsName ->
             settingsDataStore.setActiveWorkspace(wsName)
             refreshWorkspaceMetadata()
+        },
+        onFilesChanged = {
+            _workspaceFilesVersion.value++
         }
     )
 
@@ -181,6 +187,7 @@ class TerminalRuntimeHost(private val appContext: Context) {
         _workspaces.value = workspaceManager.listWorkspaces()
         _availableSkills.value = workspaceManager.listSkills()
         _cwdDisplay.value = workspaceManager.displayCwd(shellEngine.currentDir)
+        _workspaceFilesVersion.value++
     }
 
     fun createWorkspace(name: String) {

@@ -222,7 +222,10 @@ class NvidiaNimClient {
     ): Result<NvidiaStreamEvent.Completed> {
         val contentSb = StringBuilder()
         val reasoningSb = StringBuilder()
-        val toolCallBuilders = sortedMapOf<Int, MutableToolCallBuilder>()
+        val toolCallBuilders = linkedMapOf<Int, MutableToolCallBuilder>()
+        val idToBuilderKey = mutableMapOf<String, Int>()
+        val indexToBuilderKey = mutableMapOf<Int, Int>()
+        var nextSyntheticKey = 0
 
         while (!source.exhausted()) {
             currentCoroutineContext().ensureActive()
@@ -254,8 +257,34 @@ class NvidiaNimClient {
             }
 
             delta.toolCalls?.forEach { tcDelta ->
-                val builder = toolCallBuilders.getOrPut(tcDelta.index) { MutableToolCallBuilder() }
-                if (!tcDelta.id.isNullOrBlank()) builder.id = tcDelta.id
+                val rawId = tcDelta.id?.takeIf { it.isNotBlank() }
+                val key = when {
+                    rawId != null && idToBuilderKey.containsKey(rawId) -> {
+                        idToBuilderKey.getValue(rawId)
+                    }
+                    rawId != null -> {
+                        val existingForIndex = indexToBuilderKey[tcDelta.index]
+                        val assigned = if (existingForIndex == null) {
+                            val k = nextSyntheticKey++
+                            k
+                        } else {
+                            val existingBuilder = toolCallBuilders[existingForIndex]
+                            if (existingBuilder != null && existingBuilder.id.isNotBlank() && existingBuilder.id != rawId) {
+                                nextSyntheticKey++
+                            } else {
+                                existingForIndex
+                            }
+                        }
+                        idToBuilderKey[rawId] = assigned
+                        indexToBuilderKey[tcDelta.index] = assigned
+                        assigned
+                    }
+                    else -> {
+                        indexToBuilderKey.getOrPut(tcDelta.index) { nextSyntheticKey++ }
+                    }
+                }
+                val builder = toolCallBuilders.getOrPut(key) { MutableToolCallBuilder() }
+                if (rawId != null) builder.id = rawId
                 if (!tcDelta.type.isNullOrBlank()) builder.type = tcDelta.type
                 tcDelta.function?.let { fn ->
                     if (!fn.name.isNullOrBlank()) builder.name.append(fn.name)

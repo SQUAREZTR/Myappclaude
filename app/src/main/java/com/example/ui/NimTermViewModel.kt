@@ -79,6 +79,11 @@ class NimTermViewModel(application: Application) : AndroidViewModel(application)
                 refreshWorkspaceFiles()
             }
         }
+        viewModelScope.launch {
+            host.workspaceFilesVersion.collectLatest {
+                refreshWorkspaceFiles()
+            }
+        }
     }
 
     fun selectTab(tab: AppTab) {

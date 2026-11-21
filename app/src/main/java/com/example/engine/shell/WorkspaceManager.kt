@@ -342,7 +342,11 @@ class WorkspaceManager(context: Context) {
     }
 
     fun writeFile(path: String, content: String, cwd: File = rootDir): FileEditResult {
+        if (path.isBlank()) throw IllegalArgumentException("File path cannot be blank")
         val file = resolveSafe(path, cwd)
+        if (file.exists() && file.isDirectory) {
+            throw IllegalArgumentException("Target path is a directory: ${relativePath(file)}")
+        }
         val existed = file.exists() && file.isFile
         val oldLines = if (existed) file.readLines() else emptyList()
         file.parentFile?.mkdirs()

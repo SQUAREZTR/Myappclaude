@@ -37,6 +37,7 @@ class ClaudeCodeAgent(
     private val shellRunner: suspend (command: String) -> Pair<Int, String>,
     private val askApproval: suspend (toolName: String, summary: String) -> Boolean,
     private val onWorkspaceChanged: suspend (String) -> Unit = {},
+    private val onFilesChanged: suspend () -> Unit = {},
     private val onEvent: suspend (AgentTerminalEvent) -> Unit
 ) {
     private val history = mutableListOf<ApiChatMessage>()
@@ -107,10 +108,12 @@ Available Python stdlib + built-in modules: math, random, json, os, sys, time, d
 
 Rules:
 1. You have your own real sandboxed project workspace and can create/switch dedicated isolated workspaces with `manage_workspace` (list, create, switch).
-2. Use the provided tools (read_file, write_file, edit_file, list_files, grep_files, run_python, run_shell, manage_workspace) to inspect, create, edit, and verify code directly in the workspace.
-3. When writing or editing Python files, run them with `run_python` to verify there are no syntax or runtime errors before reporting success.
-4. Keep terminal responses concise, technical, and clear. Never invent file contents you haven't read.
-5. Reply in the user's language (e.g. Turkish or English) while keeping code, commands, and file paths exact.
+2. ALWAYS use tools (`read_file`, `write_file`, `edit_file`, `list_files`, `grep_files`, `run_python`, `run_shell`, `manage_workspace`) to actually create, edit, and run files on disk. NEVER just paste code in chat when asked to write or modify files.
+3. If your model backend does not emit native function calls, emit one or more XML tool calls in this exact format:
+<tool_call>{"name": "write_file", "arguments": {"path": "script.py", "content": "print('ok')\n"}}</tool_call>
+4. When writing or editing Python files, run them with `run_python` to verify there are no syntax or runtime errors before reporting success.
+5. Keep terminal responses concise, technical, and clear. Never invent file contents you haven't read.
+6. Reply in the user's language (e.g. Turkish or English) while keeping code, commands, and file paths exact.
         """.trimIndent()
     }
 
@@ -322,14 +325,34 @@ Rules:
         onEvent(AgentTerminalEvent.SystemInfo("Reached max agent steps ($maxSteps). Send a follow-up prompt to continue."))
     }
 
-    private suspend fun executeToolCall(tc: ApiToolCall, settings: NimSettings): String {
-        val name = tc.function.name
+    private fun JSONObject.firstNonBlank(vararg keys: String): String {
+        for (k in keys) {
+            if (has(k) && !isNull(k)) {
+                val v = optString(k, "")
+                if (v.isNotBlank()) return v
+            }
+        }
+        return ""
+    }
+
+    private fun JSONObject.firstStringOrNull(vararg keys: String): String? {
+        for (k in keys) {
+            if (has(k) && !isNull(k)) {
+                return optString(k, "")
+            }
+        }
+        return null
+    }
+
+    internal suspend fun executeToolCall(tc: ApiToolCall, settings: NimSettings): String {
+        val name = tc.function.name.trim()
         val args = runCatching { JSONObject(tc.function.arguments) }.getOrElse { JSONObject() }
 
         return try {
             when (name) {
                 "read_file" -> {
-                    val path = args.optString("path")
+                    val path = args.firstNonBlank("path", "file_path", "filepath", "file", "filename", "target_file")
+                    if (path.isBlank()) return "Error: Missing 'path' argument."
                     onEvent(AgentTerminalEvent.ToolStart("Read", path))
                     val text = workspace.readFile(path, cwdProvider())
                     val preview = if (text.length > 4000) text.take(4000) + "\n... (truncated)" else text
@@ -337,8 +360,9 @@ Rules:
                     preview
                 }
                 "write_file" -> {
-                    val path = args.optString("path")
-                    val content = args.optString("content")
+                    val path = args.firstNonBlank("path", "file_path", "filepath", "file", "filename", "target_file")
+                    val content = args.firstStringOrNull("content", "text", "code", "file_content") ?: ""
+                    if (path.isBlank()) return "Error: Missing 'path' argument for write_file."
                     if (!settings.autoApproveTools) {
                         val ok = askApproval("write_file", "Write $path (${content.lines().size} lines)")
                         if (!ok) {
@@ -348,13 +372,15 @@ Rules:
                     }
                     onEvent(AgentTerminalEvent.ToolStart("Write", path))
                     val diff = workspace.writeFile(path, content, cwdProvider())
+                    onFilesChanged()
                     onEvent(AgentTerminalEvent.FileDiff(diff))
                     "Wrote ${diff.relativePath} (+${diff.addedCount} / -${diff.removedCount} lines)"
                 }
                 "edit_file" -> {
-                    val path = args.optString("path")
-                    val oldText = args.optString("old_text")
-                    val newText = args.optString("new_text")
+                    val path = args.firstNonBlank("path", "file_path", "filepath", "file", "filename", "target_file")
+                    val oldText = args.firstStringOrNull("old_text", "old_string", "oldString", "old", "search") ?: ""
+                    val newText = args.firstStringOrNull("new_text", "new_string", "newString", "new", "replace") ?: ""
+                    if (path.isBlank()) return "Error: Missing 'path' argument for edit_file."
                     if (!settings.autoApproveTools) {
                         val ok = askApproval("edit_file", "Edit $path")
                         if (!ok) {
@@ -364,11 +390,12 @@ Rules:
                     }
                     onEvent(AgentTerminalEvent.ToolStart("Edit", path))
                     val diff = workspace.editFile(path, oldText, newText, cwdProvider())
+                    onFilesChanged()
                     onEvent(AgentTerminalEvent.FileDiff(diff))
                     "Edited ${diff.relativePath} (+${diff.addedCount} / -${diff.removedCount} lines)"
                 }
                 "list_files" -> {
-                    val path = args.optString("path", ".")
+                    val path = args.firstNonBlank("path", "dir", "directory").ifBlank { "." }
                     val recursive = args.optBoolean("recursive", false)
                     onEvent(AgentTerminalEvent.ToolStart("List", path))
                     val items = workspace.listFiles(path, cwdProvider(), recursive)
@@ -379,8 +406,8 @@ Rules:
                     out
                 }
                 "grep_files" -> {
-                    val pattern = args.optString("pattern")
-                    val path = args.optString("path", ".")
+                    val pattern = args.firstNonBlank("pattern", "query", "regex")
+                    val path = args.firstNonBlank("path", "dir").ifBlank { "." }
                     onEvent(AgentTerminalEvent.ToolStart("Grep", "$pattern in $path"))
                     val matches = workspace.grep(pattern, path, cwdProvider())
                     val out = if (matches.isEmpty()) "No matches found."
@@ -389,8 +416,8 @@ Rules:
                     out
                 }
                 "run_python" -> {
-                    val file = args.optString("file")
-                    val codeArg = args.optString("code")
+                    val file = args.firstNonBlank("file", "path", "file_path", "script")
+                    val codeArg = args.firstStringOrNull("code", "script_code", "source") ?: ""
                     val label = if (file.isNotBlank()) file else "-c <inline>"
                     if (!settings.autoApproveTools) {
                         val ok = askApproval("run_python", "Run python $label")
@@ -406,12 +433,14 @@ Rules:
                     } else {
                         pythonRunner(codeArg, "<agent>")
                     }
+                    onFilesChanged()
                     val trimmedOut = output.ifBlank { "(no output)" }
                     onEvent(AgentTerminalEvent.ToolOutput("Python", trimmedOut, isError = exitCode != 0))
                     "Exit code: $exitCode\n$trimmedOut"
                 }
                 "run_shell" -> {
-                    val cmd = args.optString("command")
+                    val cmd = args.firstNonBlank("command", "cmd")
+                    if (cmd.isBlank()) return "Error: Missing 'command' argument."
                     if (!settings.autoApproveTools) {
                         val ok = askApproval("run_shell", cmd)
                         if (!ok) {
@@ -421,24 +450,27 @@ Rules:
                     }
                     onEvent(AgentTerminalEvent.ToolStart("Shell", cmd))
                     val (exitCode, output) = shellRunner(cmd)
+                    onFilesChanged()
                     val trimmedOut = output.ifBlank { "(no output)" }
                     onEvent(AgentTerminalEvent.ToolOutput("Shell", trimmedOut, isError = exitCode != 0))
                     "Exit code: $exitCode\n$trimmedOut"
                 }
                 "manage_workspace" -> {
                     val action = args.optString("action", "list").lowercase()
-                    val wsName = args.optString("name", "")
+                    val wsName = args.firstNonBlank("name", "workspace")
                     onEvent(AgentTerminalEvent.ToolStart("Workspace", "$action $wsName".trim()))
                     val resultText = when (action) {
                         "create" -> {
                             val created = workspace.createWorkspace(wsName, withStarterMain = true)
                             onWorkspaceChanged(created)
+                            onFilesChanged()
                             "Created & switched to workspace '$created' (${workspace.displayCwd(workspace.rootDir)})."
                         }
                         "switch" -> {
                             val ok = workspace.switchWorkspace(wsName)
                             if (ok) {
                                 onWorkspaceChanged(workspace.activeWorkspaceName)
+                                onFilesChanged()
                                 "Switched to workspace '${workspace.activeWorkspaceName}'."
                             } else {
                                 "Workspace '$wsName' not found."
@@ -463,20 +495,77 @@ Rules:
         }
     }
 
-    private fun parseFallbackToolCalls(content: String): List<ApiToolCall> {
-        val regex = Regex("<tool_call>\\s*(\\{.*?\\})\\s*</tool_call>", RegexOption.DOT_MATCHES_ALL)
-        val matches = regex.findAll(content).toList()
-        if (matches.isEmpty()) return emptyList()
-        return matches.mapIndexedNotNull { idx, match ->
-            runCatching {
-                val obj = JSONObject(match.groupValues[1])
-                val name = obj.getString("name")
-                val argsObj = obj.optJSONObject("arguments")?.toString() ?: obj.optString("arguments", "{}")
-                ApiToolCall(
-                    id = "fallback_call_$idx",
-                    function = com.example.data.nvidia.ApiFunctionCall(name = name, arguments = argsObj)
-                )
-            }.getOrNull()
+    internal fun parseFallbackToolCalls(content: String): List<ApiToolCall> {
+        val knownTools = setOf(
+            "read_file", "write_file", "edit_file", "list_files",
+            "grep_files", "run_python", "run_shell", "manage_workspace"
+        )
+        val calls = mutableListOf<ApiToolCall>()
+
+        // 1. Extract balanced JSON objects inside <tool_call>...</tool_call> or fenced blocks or bare JSON
+        val tagRegex = Regex("<tool_call>([\\s\\S]*?)</tool_call>")
+        val tagMatches = tagRegex.findAll(content).map { it.groupValues[1] }.toList()
+        val candidates = if (tagMatches.isNotEmpty()) {
+            tagMatches
+        } else {
+            val fenceRegex = Regex("```(?:tool_call|json)?\\s*([\\s\\S]*?)```")
+            val fenced = fenceRegex.findAll(content).map { it.groupValues[1] }.toList()
+            fenced.ifEmpty { listOf(content) }
         }
+
+        for (block in candidates) {
+            for (jsonStr in extractBalancedJsonObjects(block)) {
+                runCatching {
+                    val obj = JSONObject(jsonStr)
+                    val toolName = obj.optString("name", "").ifBlank { obj.optString("tool", "") }
+                    if (toolName in knownTools) {
+                        val argsJson = obj.optJSONObject("arguments")?.toString()
+                            ?: obj.optJSONObject("parameters")?.toString()
+                            ?: obj.optString("arguments", "").ifBlank { "{}" }
+                        calls += ApiToolCall(
+                            id = "fallback_call_${calls.size}",
+                            function = com.example.data.nvidia.ApiFunctionCall(
+                                name = toolName,
+                                arguments = argsJson
+                            )
+                        )
+                    }
+                }
+            }
+        }
+        return calls
+    }
+
+    private fun extractBalancedJsonObjects(text: String): List<String> {
+        val result = mutableListOf<String>()
+        var i = 0
+        while (i < text.length) {
+            if (text[i] == '{') {
+                var depth = 0
+                var inStr = false
+                var escaped = false
+                var j = i
+                while (j < text.length) {
+                    val c = text[j]
+                    when {
+                        escaped -> escaped = false
+                        c == '\\' && inStr -> escaped = true
+                        c == '"' -> inStr = !inStr
+                        !inStr && c == '{' -> depth++
+                        !inStr && c == '}' -> {
+                            depth--
+                            if (depth == 0) {
+                                result += text.substring(i, j + 1)
+                                i = j
+                                break
+                            }
+                        }
+                    }
+                    j++
+                }
+            }
+            i++
+        }
+        return result
     }
 }

@@ -156,6 +156,7 @@ fun TerminalScreen(
                 SlashCmdSuggestion("/python", "Open Python 3.12 REPL (>>>)", true),
                 SlashCmdSuggestion("/key ", "Save NVIDIA / LiteLLM API key", false),
                 SlashCmdSuggestion("/base ", "Switch NVIDIA NIM / LiteLLM URL", false),
+                SlashCmdSuggestion("/litellm ", "Connect LiteLLM proxy (/litellm <url> [key])", false),
                 SlashCmdSuggestion("/clear", "Clear terminal & reset context", true),
                 SlashCmdSuggestion("/help", "Show all CLI & slash commands", true),
                 SlashCmdSuggestion("/exit", "Drop to $ Workspace Shell", true)
